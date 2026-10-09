@@ -23,8 +23,8 @@ from pathlib import Path
 DATA = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
 DB = DATA / "opencode" / "opencode.db"
 CACHE = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "angelos" / "opencode-scan.json"
-LIVE_WINDOW = 30 * 60   # a session is live while updated within this (seconds)
-WORKING_MAX = 5 * 60    # a not-yet-finished answer counts as working for this long
+LIVE_WINDOW = 60 * 60   # a session is live while updated within this (seconds)
+STALE_WORKING_TIMEOUT = 2 * 60 * 60  # only consider an unfinished task abandoned after 2 hours
 KEEP_DAYS = 30
 
 MODEL_RE = re.compile(r'"model"\s*:\s*\{\s*"id"\s*:\s*"([^"]+)"[^}]*?"providerID"\s*:\s*"([^"]+)"')
@@ -71,7 +71,7 @@ def main():
     now = time.time()
     con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True, timeout=3)
     try:
-        # -- live sessions (newest first; the loop stops at the first old one).
+        # -- live sessions (newest first).
         # time_suspended is NOT "paused": a streaming session gets it between
         # turns too — only time_archived takes a session out of the list.
         rows = con.execute(
@@ -82,32 +82,52 @@ def main():
         for sid, title, directory, updated, archived, tin, tout in rows:
             if archived:
                 continue
-            age = now - (updated or 0) / 1000.0
-            if age > LIVE_WINDOW:
-                break
+
+            # Latest core message (ignoring meta events like agent-switched)
             got = con.execute(
                 "select type, data, json_extract(data, '$.model.id'),"
-                " json_extract(data, '$.finish'), json_extract(data, '$.time.completed')"
+                " json_extract(data, '$.finish'), json_extract(data, '$.time.completed'),"
+                " max(time_updated, time_created)"
                 " from session_message where session_id = ?"
+                " and type in ('idle', 'user', 'assistant')"
                 " order by seq desc limit 1", (sid,)).fetchone()
-            mtype, data, mid, finish, completed = got if got else ("", "", "", "", None)
+            mtype, data, mid, finish, completed, msg_time = got if got else ("", "", "", "", None, 0)
+
+            last_act_ms = max(updated or 0, msg_time or 0)
+            age = max(0, int(now - last_act_ms / 1000.0))
 
             # A session is working while:
-            # 1) user prompt was sent (waiting for assistant)
-            # 2) assistant message is still streaming (completed is null)
-            # 3) assistant emitted tool calls (finish == 'tool-calls') and tools are executing
-            # It is ONLY done when the agent is idle or the assistant turn ended with finish != 'tool-calls'
-            if mtype == "idle":
+            # 1) OpenCode process is actively running in the OS
+            # 2) User prompt was sent (waiting for assistant)
+            # 3) Assistant message is still streaming (completed is null)
+            # 4) Assistant emitted tool calls (finish == 'tool-calls') and tools are executing
+            # It is ONLY done when:
+            # - OpenCode process is not running, OR
+            # - The agent explicitly went idle (mtype == 'idle'), OR
+            # - The assistant turn ended with a terminal finish ('stop' or 'length') and completed timestamp, OR
+            # - An abandoned turn had zero activity for over 2 hours
+            if not running or mtype == "idle":
                 working = False
             elif mtype == "user":
                 working = True
             elif mtype == "assistant":
-                working = (not completed) or (finish == "tool-calls")
+                if not completed:
+                    working = True
+                elif finish == "tool-calls":
+                    working = True
+                elif finish in ("stop", "length"):
+                    working = False
+                else:
+                    working = False
             else:
                 working = False
 
-            if working and age >= WORKING_MAX:
+            if working and age >= STALE_WORKING_TIMEOUT:
                 working = False
+
+            # If not working and older than LIVE_WINDOW, skip
+            if not working and age > LIVE_WINDOW:
+                continue
 
             model = mid if (mtype == "assistant" and mid) else ""
             if not model:
@@ -117,10 +137,10 @@ def main():
                 if older:
                     model = older[0] or model_of(older[1])
             last_text, last_msg_id, last_completed = "", "", 0
-            # Only consider the final assistant answer (exclude intermediate tool-call steps)
+            # Only consider the final assistant answer (exclude intermediate tool-call steps and streaming)
             ast = con.execute(
                 "select id, data, time_created from session_message where session_id = ?"
-                " and type = 'assistant' and json_extract(data, '$.finish') != 'tool-calls'"
+                " and type = 'assistant' and json_extract(data, '$.finish') in ('stop', 'length')"
                 " and json_extract(data, '$.time.completed') is not null"
                 " order by seq desc limit 1", (sid,)).fetchone()
             if ast:
@@ -130,6 +150,9 @@ def main():
                     last_completed = ast_data.get("time", {}).get("completed") or ast[2] or 0
                     parts = [c.get("text", "") for c in ast_data.get("content", []) if isinstance(c, dict) and c.get("type") == "text"]
                     last_text = " ".join(parts).strip()[:280]
+                    if not last_text:
+                        rparts = [c.get("text", "") for c in ast_data.get("content", []) if isinstance(c, dict) and c.get("type") == "reasoning"]
+                        last_text = " ".join(rparts).strip()[:280]
                 except Exception:
                     pass
             sessions.append({
@@ -140,7 +163,7 @@ def main():
                 "title": (title or "")[:80],
                 "model": model or "",
                 "state": "working" if working else "done",
-                "age": max(0, int(age)),
+                "age": age,
                 "in": tin or 0,
                 "out": tout or 0,
                 "lastMsgId": last_msg_id,

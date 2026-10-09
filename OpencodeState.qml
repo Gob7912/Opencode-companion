@@ -122,11 +122,13 @@ Singleton {
 
                             const wasWorking = (prevStates[s.fullId] === "working");
                             const prevMsgId = seenMsgIds[s.fullId];
-                            const isNewTurn = (s.lastMsgId && prevMsgId && s.lastMsgId !== prevMsgId);
-                            const isNewSessionDone = (!prevMsgId && s.age <= 30);
-                            const isRecent = (s.lastCompleted && (nowMs - s.lastCompleted) < 45000);
+                            const hasNewMsg = Boolean(s.lastMsgId && (!prevMsgId || s.lastMsgId !== prevMsgId));
+                            const isRecent = Boolean(s.lastCompleted && (nowMs - s.lastCompleted) < 60000);
+                            const isFastSession = (!prevMsgId && s.lastCompleted && (nowMs - s.lastCompleted) < 20000);
 
-                            if (s.state === "done" && (wasWorking || (isNewTurn && isRecent) || isNewSessionDone)) {
+                            // Notify ONLY when the session is done, has a new completed message, completed recently,
+                            // and either was tracked as working or completed right as it appeared.
+                            if (s.state === "done" && hasNewMsg && isRecent && (wasWorking || isFastSession)) {
                                 root.notifyFinished(s);
                             }
                         }
