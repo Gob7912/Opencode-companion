@@ -1,0 +1,23 @@
+{
+  "id": "opencode-companion",
+  "name": "OpenCode Companion",
+  "version": "1.0.0",
+  "author": "abubakir",
+  "description": "Спутник OpenCode: состояние живых сессий на панели, маскот на столе, «oc …» в лаунчере (задача, «? вопрос» — быстрый ответ) и токены за сегодня. Всё локально: читается только база opencode.db, сеть не используется.",
+  "icon": "bot",
+  "enabledByDefault": false,
+  "themes": ["pixel", "mac"],
+  "main": "Main.qml",
+  "barWidget": "BarWidget.qml",
+  "desktopTitle": "opencode",
+  "desktopWidget": "Orb.qml",
+  "realms": ["heaven", "hell"],
+  "sidebarWidget": "SidebarBlock.qml",
+  "launcher": "Launcher.qml",
+  "settings": "Settings.qml",
+  "settingsNear": "helper",
+  "menu": [
+    { "label": "OpenCode: продолжить сессию", "icon": "bot", "exec": "qs -c angelos ipc call opencode resume" },
+    { "label": "OpenCode: новая сессия", "icon": "terminal", "exec": "qs -c angelos ipc call opencode newSession" }
+  ]
+}
