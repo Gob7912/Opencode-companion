@@ -49,4 +49,4 @@
 
 ## Лицензия / License
 
-MIT License (c) 2026 abubakir
+MIT License 
